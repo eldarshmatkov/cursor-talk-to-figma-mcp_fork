@@ -4,6 +4,18 @@ This project implements a Model Context Protocol (MCP) integration between Curso
 
 https://github.com/user-attachments/assets/129a14d2-ed73-470f-9a4c-2240b2a4885c
 
+## To get updates from original
+
+# first if necessary 
+# Add the original repository as 'upstream'
+git remote add upstream https://github.com/sonnylazuardi/cursor-talk-to-figma-mcp.git
+
+# Fetch updates from upstream
+git fetch upstream
+
+# Merge them into your branch
+git merge upstream/main 
+
 ## Project Structure
 
 - `src/talk_to_figma_mcp/` - TypeScript MCP server for Figma integration
