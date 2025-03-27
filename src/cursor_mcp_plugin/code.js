@@ -69,12 +69,7 @@ async function handleCommand(command, params) {
       if (!params || !params.nodeId) {
         throw new Error("Missing nodeId parameter");
       }
-      return await getNodeInfo(params.nodeId);
-    case "get_nodes_info":
-      if (!params || !params.nodeIds || !Array.isArray(params.nodeIds)) {
-        throw new Error("Missing or invalid nodeIds parameter");
-      }
-      return await getNodesInfo(params.nodeIds);
+      return await getNodeInfo(params.nodeId, params.filterEmpty);
     case "create_rectangle":
       return await createRectangle(params);
     case "create_frame":
@@ -101,6 +96,8 @@ async function handleCommand(command, params) {
       return await createComponentInstance(params);
     case "export_node_as_image":
       return await exportNodeAsImage(params);
+    case "execute_code":
+      return await executeCode(params);
     case "set_corner_radius":
       return await setCornerRadius(params);
     case "set_text_content":
@@ -153,7 +150,7 @@ async function getSelection() {
   };
 }
 
-async function getNodeInfo(nodeId) {
+async function getNodeInfo(nodeId, filterEmpty = true) {
   const node = await figma.getNodeByIdAsync(nodeId);
 
   if (!node) {
@@ -164,36 +161,43 @@ async function getNodeInfo(nodeId) {
     format: "JSON_REST_V1",
   });
 
-  return response.document;
+  // Clean up the response by removing empty arrays and objects if requested
+  return filterEmpty ? cleanupResponse(response.document) : response.document;
 }
 
-async function getNodesInfo(nodeIds) {
-  try {
-    // Load all nodes in parallel
-    const nodes = await Promise.all(
-      nodeIds.map((id) => figma.getNodeByIdAsync(id))
-    );
-
-    // Filter out any null values (nodes that weren't found)
-    const validNodes = nodes.filter((node) => node !== null);
-
-    // Export all valid nodes in parallel
-    const responses = await Promise.all(
-      validNodes.map(async (node) => {
-        const response = await node.exportAsync({
-          format: "JSON_REST_V1",
-        });
-        return {
-          nodeId: node.id,
-          document: response.document,
-        };
-      })
-    );
-
-    return responses;
-  } catch (error) {
-    throw new Error(`Error getting nodes info: ${error.message}`);
+// Helper function to recursively clean up objects and remove empty arrays
+function cleanupResponse(obj) {
+  if (!obj || typeof obj !== 'object') {
+    return obj;
   }
+
+  if (Array.isArray(obj)) {
+    // Filter out empty arrays
+    if (obj.length === 0) {
+      return undefined;
+    }
+    
+    // Process each item in the array
+    const cleanedArray = obj
+      .map(item => cleanupResponse(item))
+      .filter(item => item !== undefined);
+    
+    return cleanedArray.length > 0 ? cleanedArray : undefined;
+  }
+
+  // Process object properties
+  const result = {};
+  let hasProperties = false;
+
+  for (const [key, value] of Object.entries(obj)) {
+    const cleanedValue = cleanupResponse(value);
+    if (cleanedValue !== undefined) {
+      result[key] = cleanedValue;
+      hasProperties = true;
+    }
+  }
+
+  return hasProperties ? result : undefined;
 }
 
 async function createRectangle(params) {
@@ -705,9 +709,7 @@ async function createComponentInstance(params) {
 }
 
 async function exportNodeAsImage(params) {
-  const { nodeId, scale = 1 } = params || {};
-
-  const format = "PNG";
+  const { nodeId, format = "PNG", scale = 1 } = params || {};
 
   if (!nodeId) {
     throw new Error("Missing nodeId parameter");
@@ -748,71 +750,57 @@ async function exportNodeAsImage(params) {
         mimeType = "application/octet-stream";
     }
 
-    // Proper way to convert Uint8Array to base64
-    const base64 = customBase64Encode(bytes);
-    // const imageData = `data:${mimeType};base64,${base64}`;
+    // Convert to base64
+    const uint8Array = new Uint8Array(bytes);
+    let binary = "";
+    for (let i = 0; i < uint8Array.length; i++) {
+      binary += String.fromCharCode(uint8Array[i]);
+    }
+    const base64 = btoa(binary);
+    const imageData = `data:${mimeType};base64,${base64}`;
 
     return {
       nodeId,
       format,
       scale,
       mimeType,
-      imageData: base64,
+      imageData,
     };
   } catch (error) {
     throw new Error(`Error exporting node as image: ${error.message}`);
   }
 }
-function customBase64Encode(bytes) {
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  let base64 = "";
 
-  const byteLength = bytes.byteLength;
-  const byteRemainder = byteLength % 3;
-  const mainLength = byteLength - byteRemainder;
+async function executeCode(params) {
+  const { code } = params || {};
 
-  let a, b, c, d;
-  let chunk;
-
-  // Main loop deals with bytes in chunks of 3
-  for (let i = 0; i < mainLength; i = i + 3) {
-    // Combine the three bytes into a single integer
-    chunk = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
-
-    // Use bitmasks to extract 6-bit segments from the triplet
-    a = (chunk & 16515072) >> 18; // 16515072 = (2^6 - 1) << 18
-    b = (chunk & 258048) >> 12; // 258048 = (2^6 - 1) << 12
-    c = (chunk & 4032) >> 6; // 4032 = (2^6 - 1) << 6
-    d = chunk & 63; // 63 = 2^6 - 1
-
-    // Convert the raw binary segments to the appropriate ASCII encoding
-    base64 += chars[a] + chars[b] + chars[c] + chars[d];
+  if (!code) {
+    throw new Error("Missing code parameter");
   }
 
-  // Deal with the remaining bytes and padding
-  if (byteRemainder === 1) {
-    chunk = bytes[mainLength];
+  try {
+    // Execute the provided code
+    // Note: This is potentially unsafe, but matches the Blender MCP functionality
+    const executeFn = new Function(
+      "figma",
+      "selection",
+      `
+      try {
+        const result = (async () => {
+          ${code}
+        })();
+        return result;
+      } catch (error) {
+        throw new Error('Error executing code: ' + error.message);
+      }
+    `
+    );
 
-    a = (chunk & 252) >> 2; // 252 = (2^6 - 1) << 2
-
-    // Set the 4 least significant bits to zero
-    b = (chunk & 3) << 4; // 3 = 2^2 - 1
-
-    base64 += chars[a] + chars[b] + "==";
-  } else if (byteRemainder === 2) {
-    chunk = (bytes[mainLength] << 8) | bytes[mainLength + 1];
-
-    a = (chunk & 64512) >> 10; // 64512 = (2^6 - 1) << 10
-    b = (chunk & 1008) >> 4; // 1008 = (2^6 - 1) << 4
-
-    // Set the 2 least significant bits to zero
-    c = (chunk & 15) << 2; // 15 = 2^4 - 1
-
-    base64 += chars[a] + chars[b] + chars[c] + "=";
+    const result = await executeFn(figma, figma.currentPage.selection);
+    return { result };
+  } catch (error) {
+    throw new Error(`Error executing code: ${error.message}`);
   }
-
-  return base64;
 }
 
 async function setCornerRadius(params) {
